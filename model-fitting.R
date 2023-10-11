@@ -46,7 +46,7 @@ summarize_predictions <- function(df, fit) {
         select(t, state, quantile, value)
 }
 
-plot_predictions <- function(df, fit, tback=10, q=c(0.025, 0.975), file=NULL) {
+plot_predictions <- function(df, fit, tback=10, q=c(0.025, 0.975), tspan=NULL, file=NULL) {
     pred_summ <- fit$summary.fitted.values |> 
         as_tibble() |> 
         select(mean, contains(as.character(q)))
@@ -56,15 +56,16 @@ plot_predictions <- function(df, fit, tback=10, q=c(0.025, 0.975), file=NULL) {
     
     gg <- df |> 
         bind_cols(pred_summ) |> 
-        filter(t >= tpred - tback) |> 
-        ggplot(aes(t, count)) +
+        filter(if(is.null(tspan)) t >= tpred - tback else date %within% tspan) |> 
+        ggplot(aes(date, count)) +
         geom_ribbon(aes(ymin=ymin, ymax=ymax), col="gray70", alpha=0.6) +
         geom_point(col="steelblue", size=1.05, shape=1) +
         geom_line(aes(y=mean), col="tomato3") +
         facet_wrap(~state, scales="free_y", nrow=3) +
+        scale_x_date(date_breaks="4 weeks", date_labels="%b %Y", guide=guide_axis(angle=45)) +
         labs(x="Weeks", y="Hospitalizations") +
         theme_bw() +
-        theme(panel.spacing=unit(0, "mm"), axis.title=element_text(size=14), axis.text.x=element_blank())
+        theme(panel.spacing=unit(0, "mm"), axis.title=element_text(size=14))
     
     if (!is.null(file))
         ggsave(file, gg, width=15, height=5)
