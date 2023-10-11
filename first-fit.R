@@ -7,18 +7,19 @@ dat0 <- read_csv("data/counts_state_alldisease.csv") |>
 dat <- dat0 |> 
     pivot_longer(ak_covid:last_col(), values_to="count") |> 
     separate_wider_delim(name, "_", names=c("state", "type")) |> 
+    complete(state, type, t) |> 
     mutate(
         epiweek=as.numeric(str_sub_all(orig_index, 5, 6)),
         count=round(count),
         snum=as.numeric(factor(state)),
-        tnum=as.numeric(factor(type))
+        dnum=as.numeric(factor(type))
     )
 
 dat_sub <- filter(
     dat,
     state %in% c("va", "nc", "tn", "sc", "ga", "fl", "al", "la", "tx")
 ) |> 
-    mutate(snum=as.numeric(factor(state)), tnum=as.numeric(factor(type))) # have to redo the indices from 1 for INLA
+    mutate(snum=as.numeric(factor(state)), dnum=as.numeric(factor(type))) # have to redo the indices from 1 for INLA
 
  ggplot(dat, aes(t, count, col=state, group=state)) +
     geom_line(alpha=0.5) +
@@ -26,9 +27,9 @@ dat_sub <- filter(
     facet_wrap(~type, scales="free_y") +
     theme_bw()
 
-hyper_epwk <- list(theta=list(prior="pc.prec", param=c(1, 0.01)))
-hyper_st <- list(theta=list(prior="pc.prec", param=c(0.5, 0.01)))
-hyper_wk <- list(theta=list(prior="loggamma", param=c(1, 0.01))) # fairly constrained
+hyper_epwk <- list(theta=list(prior="loggamma", param=c(1, 0.01))) # more favorable to large jumps
+# hyper_st <- list(theta=list(prior="pc.prec", param=c(0.5, 0.01)))
+hyper_wk <- list(theta=list(prior="loggamma", param=c(1.5, 0.005))) # precision constrained away from 0; P(prec<1)=0.02%, P(prec<100)=20%. NOTE (10/9): varying this prior has virtually no effect even with a subset of data
 
 # mod2 <- count ~ 1 + f(
 #     t, model="rw2", group=tnum, cyclic=FALSE, hyper=hyper1, scale.model=TRUE
@@ -43,19 +44,18 @@ hyper_wk <- list(theta=list(prior="loggamma", param=c(1, 0.01))) # fairly constr
 
 dat_pred <- expand_grid(
     tibble(t=1:5+max(dat_sub$t), epiweek=1:5+last(dat_sub$epiweek)), 
-    tibble(type=unique(dat_sub$type), tnum=unique(dat_sub$tnum)), # allows predictions for states without RSV data
+    tibble(type=unique(dat_sub$type), dnum=unique(dat_sub$dnum)), # allows _predictions_ for states without RSV data
     distinct(dat_sub, state, snum)
 )
 
 dat_pred <- dat_sub |> 
     bind_rows(dat_pred) |> 
-    filter(type == "covid")
+    mutate(sdnum=as.numeric(factor(str_c(snum, dnum))))
  
-# TODO notice that seasonal trends are currently basically the same for each state (consider shared fx)
-mod2 <- count ~ 1 + f(t, model="ar1", group=snum, hyper=hyper_wk, control.group=list(model="exchangeable")) + f(
-    epiweek, model="rw2", group=snum, cyclic=TRUE, hyper=hyper_epwk,
-    control.group=list(model="iid", hyper=hyper_st)
-)
+mod2 <- count ~ 1 + 
+    f(epiweek, model="rw2", cyclic=TRUE, hyper=hyper_epwk, group=dnum, 
+      control.group=list(model="iid", hyper=list(theta=list(initial=1, fixed=TRUE)))) +
+    f(t, model="ar1", group=sdnum, hyper=hyper_wk, control.group=list(model="exchangeable"))
 
 fit2 <- inla(
     mod2, family="poisson", data=dat_pred,
@@ -63,15 +63,15 @@ fit2 <- inla(
     control.predictor=list(link=1, compute=TRUE)
 )
 
-ep_wk_fx <- fit2$summary.random$epiweek |> 
-    as_tibble() |> 
-    mutate(state=rep(unique(dat_pred$state), each=53)) # assumes states are in correct order in dat_pred
+ep_wk_fx <- fit$summary.random$epiweek |> 
+    as_tibble()
+    # mutate(state=rep(unique(dat_pred$state), each=53)) # assumes states are in correct order in dat_pred
 
 ggplot(ep_wk_fx, aes(ID, mean)) +
     geom_ribbon(aes(ymin=`0.025quant`, ymax=`0.975quant`), col="gray70", alpha=0.6) +
-    geom_line(aes(col=state)) +
-    facet_wrap(~state) +
-    labs(x="Week of the year", y="Mean effect (log scale)") +
+    geom_line() +
+    # facet_wrap(~state) +
+    labs(x="Week of the year", y="Seasonal effect (log scale)") +
     theme_bw() +
     theme(legend.position="none")
 
@@ -84,11 +84,10 @@ dat_pred |>
     ggplot(aes(t, count)) +
     geom_ribbon(aes(ymin=pred_min, ymax=pred_max), col="gray70", alpha=0.6) +
     geom_point(col="gray30", size=0.95, shape=1, alpha=0.9) +
-    geom_line(aes(y=pred_mean, col=state)) +
-    facet_wrap(~state, scales="free_y", nrow=3) +
+    geom_line(aes(y=pred_mean, col=type)) +
+    facet_grid(type~state, scales="free_y") +
     scale_x_continuous(sec.axis=sec_axis(~.x / 53, "years", breaks=1:3)) +
-    xlim(120, NA) +
     theme_bw() +
-    theme(legend.position="none")
+    theme(panel.spacing=unit(0, "mm"))
     
-ggsave("figs/fit2-covid-sub-pred.pdf", width=7, height=6)
+ggsave("figs/fit-triple-1st-attempt.pdf", width=11.5, height=7.5)
