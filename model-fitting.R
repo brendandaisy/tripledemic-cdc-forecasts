@@ -46,7 +46,8 @@ prep_pred_data <- function(df, tpred=5) {
             epiweek=epiweek(date)
         ),
         distinct(df, state, snum, division, region)
-    )
+    ) |> 
+        left_join(distinct(df, state, epiweek, ex_lam)) # go and find `ex_lam` values for each state and epiweek
     
     bind_rows(df, pred_df) |> # add to data for counts to be NAs
         arrange(t)
@@ -66,13 +67,13 @@ fit_current_model <- function(df, q=c(0.025, 0.5, 0.975), graph=NULL, joint=FALS
     } else {
         mod <- count ~ 1 +
             f(epiweek, model="rw2", cyclic=TRUE, hyper=hyper_epwk, scale.model=TRUE) +
-            f(snum, model="besag", graph=graph, hyper=hyper_wk, scale.model=TRUE, group=t, control.group=list(model="ar1"))
+            f(snum, model="besagproper", graph=graph, hyper=hyper_wk, group=t, control.group=list(model="ar1"))
     }
     
     pred_idx <- which(is.na(df$count))
     fit <- inla(
         mod, family="poisson", data=df, # poisson regression link
-        E=df$ex_count,
+        E=df$ex_lam,
         quantiles=q,
         selection=if (!joint) NULL else list(Predictor=pred_idx),
         # lincomb=inla.make.lincombs(Predictor=lc_nat),
@@ -82,44 +83,93 @@ fit_current_model <- function(df, q=c(0.025, 0.5, 0.975), graph=NULL, joint=FALS
     return(fit)
 }
 
-summarize_predictions <- function(df, fit) {
-    
-    map2(fit$marginals.fitted.values, flu_pred$ex_count, \(m, ex) {
-        msamp <- inla.rmarginal(1000, m)
-        
+sample_count_predictions <- function(df, fit, q) {
+    samp_counts <- map2_dfr(fit$marginals.fitted.values, df$ex_lam, \(m, ex) {
+        msamp <- pmax(0, inla.rmarginal(1000, m)) # sampling sometimes produces very small neg. numbers
+        ct_samp <- rpois(1000, msamp * ex)
+        tibble_row(count_samp=list(ct_samp), mean=mean(ct_samp), !!!quantile(ct_samp, q, names=TRUE))
     })
     
-    quantiles <- fit$summary.fitted.values |> 
-        as_tibble() |> 
-        select(contains("quant"))
-    
-    df |> 
-        bind_cols(quantiles) |> 
-        filter(is.na(count)) |> 
-        pivot_longer(contains("quant"), names_to="quantile") |> 
-        mutate(quantile=parse_number(quantile)) |> 
-        select(t, state, quantile, value)
+    return(bind_cols(df, samp_counts))
+    # quantiles <- fit$summary.fitted.values |> 
+    #     as_tibble() |> 
+    #     select(contains("quant"))
+    # 
+    # df |>
+    #     bind_cols(quantiles) |>
+        # filter(is.na(count)) |>
+        # pivot_longer(contains("quant"), names_to="quantile") |>
+        # mutate(quantile=parse_number(quantile)) |>
+        # select(t, state, quantile, value)
 }
 
-plot_predictions <- function(df, fit, state=unique(df$state), tback=10, tspan=NULL, file=NULL) {
-    pred_summ <- fit$summary.fitted.values |> 
-        as_tibble() |> 
-        select(mean, contains("quant"))
+# sample_national <- function(df, fit, q) {
+#     tlast <- min(filter(flu_pred, is.na(count))$t)
+#     jsamp_fvals <- exp(inla.rjmarginal(5000, fit$selection)$samples)
+#     ex_lam <- distinct(df, state, ex_lam)$ex_lam # TODO: unsafe programming
+#     
+#     tslice <- list(1:52, 53:104, 105:156, 157:208, 209:260) # TODO: unsafe programming
+#     imap_dfr(tslice, \(idx, t) {
+#         nat_sum_per_t <- map_dbl(1:5000, \(samp) {
+#             lambda <- jsamp_fvals[idx, samp] * ex_lam
+#             samp <- rpois(52, lambda)
+#             sum(samp)
+#         })
+#         qs <- quantile(nat_sum_per_t, q)
+#         names(qs) <- str_c("q", names(qs))
+#         tibble_row(t=tlast+t, mean=mean(nat_sum_per_t), !!!qs)
+#     })
+# }
+
+sample_national <- function(count_pred, q) {
+    nsamp <- length(count_pred$count_samp[[1]])
     
-    tpred <- min(filter(df, is.na(count))$t)
+    filter(count_pred, is.na(count)) |> 
+        group_by(t) |> 
+        group_modify(\(gdf, key) {
+            m <- matrix(as.double(flatten(gdf$count_samp)), nsamp, nrow(gdf))
+            nat_sum_per_t <- rowSums(m)
+            qs <- quantile(nat_sum_per_t, q)
+            names(qs) <- str_c("q", names(qs))
+            tibble(mean=mean(nat_sum_per_t), !!!qs)
+        }) |> 
+        ungroup()
     
-    df_plt <- df |> 
-        bind_cols(pred_summ) |> 
-        filter(
+    # tlast <- min(filter(flu_pred, is.na(count))$t)
+    # jsamp_fvals <- exp(inla.rjmarginal(5000, fit$selection)$samples)
+    # ex_lam <- distinct(df, state, ex_lam)$ex_lam # TODO: unsafe programming
+    # 
+    # tslice <- list(1:52, 53:104, 105:156, 157:208, 209:260) # TODO: unsafe programming
+    # imap_dfr(tslice, \(idx, t) {
+    #     nat_sum_per_t <- map_dbl(1:5000, \(samp) {
+    #         lambda <- jsamp_fvals[idx, samp] * ex_lam
+    #         samp <- rpois(52, lambda)
+    #         sum(samp)
+    #     })
+    #     qs <- quantile(nat_sum_per_t, q)
+    #     names(qs) <- str_c("q", names(qs))
+    #     tibble_row(t=tlast+t, mean=mean(nat_sum_per_t), !!!qs)
+    # })
+}
+
+plot_predictions <- function(cound_pred, state=unique(count_pred$state), tback=10, tspan=NULL, file=NULL) {
+    # pred_summ <- fit$summary.fitted.values |> 
+    #     as_tibble() |> 
+    #     select(mean, contains("quant"))
+    
+    tpred <- min(filter(count_pred, is.na(count))$t)
+    
+    df_plt <- filter(
+            count_pred,
             if(is.null(tspan)) t >= (tpred - tback) else date %within% tspan,
             state %in% !!state
         )
     
     gg <- ggplot(df_plt, aes(date, count)) +
-        geom_ribbon(aes(ymin=`0.25quant`, ymax=`0.75quant`), fill="gray60", alpha=0.6) +
-        geom_ribbon(aes(ymin=`0.025quant`, ymax=`0.975quant`), fill="gray80", alpha=0.6) +
+        geom_ribbon(aes(ymin=`25%`, ymax=`75%`), fill="gray60", alpha=0.6) +
+        geom_ribbon(aes(ymin=`2.5%`, ymax=`97.5%`), fill="gray80", alpha=0.6) +
         geom_point(col="steelblue", size=1.05) +
-        geom_point(aes(y=count_true), filter(df_plt, is.na(count)), col="maroon1", size=1.05) +
+        # geom_point(aes(y=count_true), filter(df_plt, is.na(count)), col="maroon1", size=1.05) +
         geom_line(aes(y=mean), col="tomato3") +
         facet_wrap(~state, scales="free_y", nrow=4) +
         scale_x_date(date_breaks="4 weeks", date_labels="%d %b %y", guide=guide_axis(angle=45)) +
