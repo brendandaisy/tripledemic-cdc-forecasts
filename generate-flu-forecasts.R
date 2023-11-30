@@ -13,7 +13,7 @@ source("model-summarize-and-plot.R")
 
 # Data prep and model fitting-----------------------------------------------------
 # Read in current data
-forecast_date <- ymd("2023-11-11") # Saturday following submission date
+forecast_date <- ymd("2023-12-02") # Saturday following submission date
 flu0 <- fetch_flu()
 
 location_info <- distinct(flu0, location, location_name) # get the location coding for saving final results
@@ -29,11 +29,11 @@ fit_df <- prep_fit_data(flu, weeks_ahead=4)
 fit <- fit_current_model(fit_df, forecast_date, graph=us_adj, joint=TRUE)
 
 # get US predictions
-nat_samps <- sample_national(fit_df, fit, forecast_date)
+nat_samps <- sample_national(fit_df, fit, forecast_date, nsamp=2000)
 
 # add a column `count_samp` containing posterior predictive samples for each week
 # this is the dataframe to be used in all summaries downstream
-pred_samples <- sample_count_predictions(fit_df, fit)
+pred_samples <- sample_count_predictions(fit_df, fit, forecast_date, nsamp=2000)
 
 # Produce the two summary dataframes to be submitted------------------------------
 quantiles_needed <- c(0.01, 0.025, seq(0.05, 0.95, by = 0.05), 0.975, 0.99)
@@ -70,6 +70,23 @@ plots <- unique(flu$location) |>
 
 plot_grid(plotlist = plots) |> 
     save_plot(filename=paste0("weekly-predictions/prediction-fig-", forecast_date, ".pdf"), base_height=12, base_asp=1.6, bg='white')
+
+cleaned_forecasts_ratechange <- cleaned_forecasts_ratechange |> 
+    mutate(output_type_id=fct_relevel(output_type_id, c("large_increase", "increase", "stable", "decrease")))
+
+plots_pmfs <- map(
+    unique(flu$location), 
+    \(loc) plot_state_pmf(loc, curr_season_data, cleaned_forecasts_ratechange)
+)
+
+legend <- pmf_legend(cleaned_forecasts_ratechange)
+
+save_plot(
+    filename=paste0("weekly-predictions/ratechange-fig-", forecast_date, ".pdf"), 
+    plot=ggdraw(plot_grid(plotlist=plots_pmfs)) + draw_plot(legend, 0.76, -0.4),
+    base_height=12, base_asp=1.6, bg='white'
+)
+
 
 # Validate forecast file --------------------------------------------------
 library(hubValidations)

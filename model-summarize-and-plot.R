@@ -1,29 +1,40 @@
 ## Work with Bren's forecasts
 library(tidyverse)
 
-# TODO: transition towards sampling from joint distribution for the 5 forecasting weeks
-sample_count_predictions <- function(fit_df, fit, nsamp=1000) {
+sample_count_predictions <- function(fit_df, fit, forecast_date, nsamp=1000) {
     samp_counts <- map2_dfr(fit$marginals.fitted.values, fit_df$ex_lam, \(m, ex) {
         msamp <- pmax(0, inla.rmarginal(nsamp, m)) # sampling sometimes produces very small neg. numbers
         ct_samp <- rpois(nsamp, msamp * ex)
         tibble_row(count_samp=list(ct_samp))
     })
-    
+
     return(bind_cols(fit_df, samp_counts))
+    # state_info <- distinct(fit_df, location, ex_lam)
+    # nstate <- nrow(state_info)
+    # 
+    # ret_df <- fit_df |> 
+    #     filter(date >= forecast_date)
+    # 
+    # jsamp_fvals <- exp(inla.rjmarginal(nsamp, fit$selection)$samples)
+    # ex_lam <- ret_df$ex_lam
+    # 
+    # tslice <- map(1:length(unique(ret_df$date)), ~nstate*(.x-1) + 1:nstate) # produce sequence [1:nstate, nstate+1:2nstate, ...]
+    # 
+    # imap_dfr(tslice, \(idx, t) {
+    #     nat_sum_per_t <- map_dbl(1:nsamp, \(samp) {
+    #         lambda <- jsamp_fvals[idx, samp] * ex_lam
+    #         samp <- rpois(nstate, lambda)
+    #         tibble_row(count_samp=list(samp))
+    #     })
+    #     # qs <- quantile(nat_sum_per_t, q)
+    #     # names(qs) <- str_c("q", names(qs))
+    #     tibble_row(location="US", count_samp=list(nat_sum_per_t))
+    # }) |> 
+    #     bind_cols(ret_df) |> 
+    #     select(date:epiweek, location, population, count_samp)
 }
 
 sample_national <- function(fit_df, fit, forecast_date, nsamp=1000) {
-    # filter(count_pred, is.na(count)) |> 
-    #     group_by(t) |> 
-    #     group_modify(\(gdf, key) {
-    #         m <- matrix(as.double(flatten(gdf$count_samp)), nsamp, nrow(gdf))
-    #         nat_sum_per_t <- rowSums(m)
-    #         qs <- quantile(nat_sum_per_t, q)
-    #         names(qs) <- str_c("q", names(qs))
-    #         tibble(mean=mean(nat_sum_per_t), !!!qs)
-    #     }) |> 
-    #     ungroup()
-    
     state_info <- distinct(fit_df, location, ex_lam)
     nstate <- nrow(state_info)
     
@@ -151,6 +162,53 @@ plot_state_forecast <- function(curr_location_name,
         labs(title = curr_location_name, x = NULL, y ='Admits') +
         background_grid(major = 'xy', minor = 'y') +
         coord_cartesian(ylim = c(0, max(c(curr_df$count, forecast_df$`0.75`))))
+}
+
+plot_state_pmf <- function(location_name, curr_season_data, ratechange_df) {
+
+    curr_df <- curr_season_data |> 
+        filter(location == location_name)
+    
+    ratechange_df <- filter(ratechange_df, location == location_name)
+    
+    pred_date_start <- min(ratechange_df$target_end_date)
+    pred_date_end <- max(ratechange_df$target_end_date)
+    
+    p1 <- ggplot(curr_df, aes(date, count)) +
+        geom_point() +
+        guides(x=guide_axis(angle=40)) +
+        labs(title = location_name, x = NULL, y ='Admits') +
+        background_grid(major = 'xy', minor = 'y') +
+        theme(plot.margin=margin(7, 0, 7, 7))
+    
+    p2 <- ggplot(ratechange_df, aes(target_end_date, value, fill=output_type_id)) +
+        geom_col() +
+        labs(x=NULL, y=NULL) +
+        scale_y_continuous(expand=expansion()) +
+        scale_x_date(breaks=c(pred_date_start, pred_date_end), guide=guide_axis(angle=40), date_labels="%b %d") +
+        background_grid(major="none") +
+        theme(
+            axis.text.y=element_blank(),
+            axis.ticks.y=element_blank(),
+            # axis.line.y=element_line(color="gray85"),
+            axis.line.y=element_blank(),
+            plot.margin=margin(7, 7, 7, 0),
+            legend.position="none"
+        )
+    
+    plot_grid(p1, plot_grid(NULL, p2, rel_heights=c(0.1, 1), nrow=2), nrow=1, rel_widths=c(1, 0.3), axis="b")
+}
+
+pmf_legend <- function(ratechange_df) {
+    
+    ratechange_df <- filter(ratechange_df, location == "Texas")
+    
+    p <- ggplot(ratechange_df, aes(target_end_date, value, fill=output_type_id)) +
+        geom_col() +
+        labs(fill=NULL) +
+        theme(legend.position="right", legend.box.margin=margin())
+    
+    get_legend(p)
 }
 
 # assumes the most recent week of data is in first row, for current epiweek
