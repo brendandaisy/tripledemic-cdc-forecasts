@@ -2,36 +2,27 @@
 library(tidyverse)
 
 sample_count_predictions <- function(fit_df, fit, forecast_date, nsamp=1000) {
-    samp_counts <- map2_dfr(fit$marginals.fitted.values, fit_df$ex_lam, \(m, ex) {
-        msamp <- pmax(0, inla.rmarginal(nsamp, m)) # sampling sometimes produces very small neg. numbers
-        ct_samp <- rpois(nsamp, msamp * ex)
-        tibble_row(count_samp=list(ct_samp))
-    })
+    # samp_counts <- map2_dfr(fit$marginals.fitted.values, fit_df$ex_lam, \(m, ex) {
+    #     msamp <- pmax(0, inla.rmarginal(nsamp, m)) # sampling sometimes produces very small neg. numbers
+    #     ct_samp <- rpois(nsamp, msamp * ex)
+    #     tibble_row(count_samp=list(ct_samp))
+    # })
+    # 
+    # return(bind_cols(fit_df, samp_counts))
+    state_info <- distinct(fit_df, location, ex_lam)
+    nstate <- nrow(state_info)
 
-    return(bind_cols(fit_df, samp_counts))
-    # state_info <- distinct(fit_df, location, ex_lam)
-    # nstate <- nrow(state_info)
-    # 
-    # ret_df <- fit_df |> 
-    #     filter(date >= forecast_date)
-    # 
-    # jsamp_fvals <- exp(inla.rjmarginal(nsamp, fit$selection)$samples)
-    # ex_lam <- ret_df$ex_lam
-    # 
-    # tslice <- map(1:length(unique(ret_df$date)), ~nstate*(.x-1) + 1:nstate) # produce sequence [1:nstate, nstate+1:2nstate, ...]
-    # 
-    # imap_dfr(tslice, \(idx, t) {
-    #     nat_sum_per_t <- map_dbl(1:nsamp, \(samp) {
-    #         lambda <- jsamp_fvals[idx, samp] * ex_lam
-    #         samp <- rpois(nstate, lambda)
-    #         tibble_row(count_samp=list(samp))
-    #     })
-    #     # qs <- quantile(nat_sum_per_t, q)
-    #     # names(qs) <- str_c("q", names(qs))
-    #     tibble_row(location="US", count_samp=list(nat_sum_per_t))
-    # }) |> 
-    #     bind_cols(ret_df) |> 
-    #     select(date:epiweek, location, population, count_samp)
+    ret_df <- fit_df |>
+        filter(date >= forecast_date)
+
+    jsamp_fvals <- exp(inla.rjmarginal(nsamp, fit$selection)$samples)
+    ex_lam <- ret_df$ex_lam
+
+    count_samp <- list_transpose(map(1:nsamp, \(samp) { # invert list so have sampled counts for each row
+            lambda <- jsamp_fvals[,samp] * ex_lam
+            rpois(length(lambda), lambda) # ind. Poisson for each spacetime series
+    }))
+    return(mutate(ret_df, count_samp=count_samp))
 }
 
 sample_national <- function(fit_df, fit, forecast_date, nsamp=1000) {
@@ -48,9 +39,9 @@ sample_national <- function(fit_df, fit, forecast_date, nsamp=1000) {
 
     tslice <- map(1:nrow(ret_df), ~nstate*(.x-1) + 1:nstate) # produce sequence [1:nstate, nstate+1:2nstate, ...]
     
-    imap_dfr(tslice, \(idx, t) {
+    map_dfr(tslice, \(slice) {
         nat_sum_per_t <- map_dbl(1:nsamp, \(samp) {
-            lambda <- jsamp_fvals[idx, samp] * ex_lam
+            lambda <- jsamp_fvals[slice, samp] * ex_lam
             samp <- rpois(nstate, lambda)
             sum(samp)
         })
@@ -145,27 +136,28 @@ summarize_rate_change <- function(pred_samples, nat_samps, forecast_date) {
 }
 
 # Make plots --------------------------------------------------------------
-plot_state_forecast <- function(curr_location_name,
-                                 curr_season_data, 
-                                 forecast_df) {
-    # browser()
+plot_state_forecast <- function(location_name, curr_season_data, forecast_df, sampled_ts) {
     curr_df <- curr_season_data |> 
-        filter(location == curr_location_name)
+        filter(location == location_name)
     
-    forecast_df <- filter(forecast_df, location == curr_location_name)
+    forecast_df <- filter(forecast_df, location == location_name)
+    ts_df <- filter(sampled_ts, location == location_name)
     
     ggplot(forecast_df, aes(target_end_date, `0.5`)) +
         geom_ribbon(aes(ymin = `0.025`, ymax = `0.975`), alpha = .2) +
         geom_ribbon(aes(ymin = `0.25`, ymax = `0.75`), alpha = .2) +
         geom_line() +
+        geom_line(
+            aes(date, count_samp, group=samp_id, col=as.factor(samp_id)), ts_df, 
+            alpha=0.5, show.legend=FALSE
+        ) +
         geom_point(data = curr_df, aes(date, count)) +
-        labs(title = curr_location_name, x = NULL, y ='Admits') +
+        labs(title = location_name, x = NULL, y ='Admits') +
         background_grid(major = 'xy', minor = 'y') +
         coord_cartesian(ylim = c(0, max(c(curr_df$count, forecast_df$`0.75`))))
 }
 
 plot_state_pmf <- function(location_name, curr_season_data, ratechange_df) {
-
     curr_df <- curr_season_data |> 
         filter(location == location_name)
     
@@ -200,7 +192,6 @@ plot_state_pmf <- function(location_name, curr_season_data, ratechange_df) {
 }
 
 pmf_legend <- function(ratechange_df) {
-    
     ratechange_df <- filter(ratechange_df, location == "Texas")
     
     p <- ggplot(ratechange_df, aes(target_end_date, value, fill=output_type_id)) +

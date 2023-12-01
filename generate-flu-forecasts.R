@@ -62,11 +62,21 @@ forecast_df <- cleaned_forecasts_quantiles |>
     # left_join(locations, by='location') |> 
     spread(output_type_id, value)
 
+# sample a few forecasts from the joint distribution to show correlations across states and time
+ts_ids <- sample(2000, 4)
+
+sampled_timeseries <- pred_samples |> 
+    unnest(count_samp) |> 
+    group_by(date, location) |> 
+    mutate(samp_id=1:n()) |> 
+    filter(samp_id %in% ts_ids) |> 
+    ungroup()
 
 plots <- unique(flu$location) |> 
     map(plot_state_forecast, 
         curr_season_data = curr_season_data, 
-        forecast_df = forecast_df)
+        forecast_df = forecast_df,
+        sampled_ts=sampled_timeseries)
 
 plot_grid(plotlist = plots) |> 
     save_plot(filename=paste0("weekly-predictions/prediction-fig-", forecast_date, ".pdf"), base_height=12, base_asp=1.6, bg='white')
