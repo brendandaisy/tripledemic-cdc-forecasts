@@ -5,53 +5,60 @@ library(spdep)
 library(lubridate)
 library(cowplot)
 
-source("model-fitting.R")
+# TODO: 1st retrospective question! Does training without the 2021-2022 season improve performance?
 
-add_t_group <- function(df) {
-    
-}
+source("model-fitting.R")
+source("retrospective-helpers.R")
+
+# add_t_group <- function(df) {
+#     
+# }
 
 # Read in current data to long format---------------------------------------------
 flu0 <- fetch_flu()
 
+location_info <- distinct(flu0, location, location_name) # get the location coding for saving final results
+
 flu <- flu0 |> 
-    rename(state=location_name, count=value) |> 
-    group_by(date) |> 
-    mutate(t=cur_group_id(), epiweek=epiweek(date), .after=date) |> # add a time counter starting from 1 for earliest week
-    ungroup() |> 
-    filter(state != "US") |> # make sure US is not in training data
-    mutate(snum=as.numeric(fct_inorder(state))) # INLA needs groups as ints starting from 1, so add numeric state code
+    select(-location, location=location_name, count=value) |> 
+    filter(location != "US")
 
-us0 <- read_sf("data/us-state-boundaries.shp")
-
-us <- us0 |> 
-    filter(name %in% unique(flu$state)) |> 
-    select(state=name, division, region)
-
-state_order <- fct_inorder(unique(flu$state))
-
-# sort order of states to match their order of appearance in flu data
-us <- us |> 
-    mutate(state=fct_relevel(state, levels(state_order))) |> 
-    arrange(state)
-
-us_adj <- us |> 
-    poly2nb() |> 
-    nb2mat(style="B", zero.policy=TRUE)
+# Load the state graph/neighborhood matrix
+us <- load_us_graph(flu)
+us_adj <- us_adj_mat(us)
 
 ###
 
-flu$count_true <- flu$count
-tspan1 <- interval(min(flu0$date), "2022-10-01") # the first training window to be plotted
+pred_quants <- summarize_quantiles(pred_samples, nat_samps, forecast_date, quantiles_needed)
 
-pred_data <- map(duration(0:5, "week"), \(tmax) {
-    tspan <- interval(int_start(tspan1), int_end(tspan1) + tmax + duration(5, "week"))
+tmp <- filter(pred_quants, location == "Ohio", date == "2023-12-30")
+weighted_interval_score(450, tmp)
+
+# 4 dimensional path forecast
+tmp2 <- filter(pred_samples, location == "Ohio")
+
+# produce n X p (100 X 4) matrix
+tmp2 <- do.call(cbind, tmp2$count_samp)
+mmed <- hdepthmedian(tmp2)
+###
+
+forecast_dates <- rev(seq.Date(ymd("2023-11-04"), ymd("2023-02-01"), by="-4 weeks"))
+
+pred_data <- map(forecast_dates, \(fdate) {
+    flu_sub <- filter(flu, date < fdate)
     
-    flu_pred <- filter(flu, date %within% tspan) |>
-        mutate(count=ifelse(date <= (int_end(tspan1) + tmax), count, NA))
+    flu_pred <- prep_fit_data(flu_sub, weeks_ahead=4) |> 
+        mutate(count_true=filter(flu, date <= (fdate + duration("3 weeks")))$count)
 })
 
-fits <- map(pred_data, fit_current_model, graph=us_adj)
+fit_results <- map2_dfr(forecast_dates, pred_data, \(fdate, df) {
+    fit <- fit_current_model(df, fdate, graph=us_adj)
+    pred_samps <- sample_count_predictions(df, fit, fdate, nsamp=600)
+    tibble_row(forecast_date=fdate, weeks_ahead=4, fit=list(fit), pred_samps=list(pred_samps))
+})
+
+
+
 ggs <- map2(pred_data, fits, \(df, ft) {
     plot_predictions(df, ft, tback=20, state=c("Vermont")) +
         coord_cartesian(ylim=c(0, NA))

@@ -22,7 +22,7 @@ load_us_graph <- function(flu, f="data/us-state-boundaries.shp") {
 us_adj_mat <- function(us) {
     us_adj <- us |> 
         poly2nb() |> 
-        nb2mat(style="W", zero.policy=TRUE)
+        nb2mat(style="B", zero.policy=TRUE)
     
     us_adj[which(us$state == "Florida"), which(us$state == "Puerto Rico")] <- 1
     us_adj[which(us$state == "Puerto Rico"), which(us$state == "Florida")] <- 1
@@ -65,17 +65,23 @@ prep_fit_data <- function(flu, weeks_ahead=4) {
         ),
         distinct(ret, location, snum, population) # makes pairs of new times X each state
     ) |> 
-        left_join(distinct(ret, location, epiweek, ex_lam)) # go and find `ex_lam` values for each state and epiweek
+        # go and find `ex_lam` values for each state and epiweek
+        left_join(distinct(ret, location, epiweek, ex_lam), by=c("location", "epiweek"))
     
     bind_rows(ret, pred_df) |> # add to data for counts to be NAs
         arrange(t)
 }
 
-fit_current_model <- function(fit_df, forecast_date, q=c(0.025, 0.5, 0.975), graph=NULL, joint=TRUE) {
+# forecast_date = the first OUT of sample date, i.e. date to start predictions
+# graph = state adjacency graph, to be used as specified by model
+fit_current_model <- function(
+        fit_df, forecast_date, model=NULL,
+        q=c(0.025, 0.5, 0.975), graph=NULL, joint=TRUE
+    ) {
     # the PC priors c(u, a) give the probability that the standard deviation between weeks u is greater than a
-    # increasing u increases prior beliefs that there will be large jumps in data between weeks; see `inla.doc("pc.prec")`
+    # increasing u increases prior beliefs that there will be large jumps in data between weeks
     hyper_epwk <- list(prec=list(prior="pc.prec", param=c(0.5, 0.01))) # a priori the seasonal effect should be more smooth
-    hyper_wk <- list(theta1=list(prior="pc.prec", param=c(1, 0.01))) # more favorable to large jumps
+    hyper_wk <- list(prec=list(prior="pc.prec", param=c(1, 0.01))) # more favorable to large jumps
     
     if (is.null(graph)) {
         sp_control <- list(model="exchangeable")
@@ -83,7 +89,7 @@ fit_current_model <- function(fit_df, forecast_date, q=c(0.025, 0.5, 0.975), gra
             f(epiweek, model="rw2", cyclic=TRUE, hyper=hyper_epwk, scale.model=TRUE) + # seasonal effect (currently shared over states)
             f(t, model="ar1", group=snum, hyper=hyper_wk, control.group=sp_control) # weekly x state effect
     } else {
-        mod <- count ~ 1 +
+        mod <- count ~ 1 + location +
             f(epiweek, model="rw2", cyclic=TRUE, hyper=hyper_epwk, scale.model=TRUE) +
             f(snum, model="besagproper", graph=graph, hyper=hyper_wk, group=t, control.group=list(model="ar1"))
     }
@@ -99,6 +105,26 @@ fit_current_model <- function(fit_df, forecast_date, q=c(0.025, 0.5, 0.975), gra
         control.predictor=list(link=1) # compute quantiles for NA dates (i.e. do the forecasting)
     )
     return(fit)
+}
+
+# assumes the following variables are available in the environment:
+# epiweek, snum, week, graph, and lists storing hyperpriors for the seasonal and weekly
+# random effects, `hyper_epwk` and `hyper_wk` respectively
+current_flu_model <- function(graph) {
+    count ~ 1 +
+        f(epiweek, model="rw2", cyclic=TRUE, hyper=hyper_epwk, scale.model=TRUE) +
+        f(snum, model="besagproper", graph=graph, hyper=hyper_wk, group=t, control.group=list(model="ar1"))
+}
+
+flu_model_1_10 <- function() {
+    as.formula(count ~ 1 +
+        f(t, model="ar1", hyper=hyper_wk) +
+        f(
+            snum, model="besagproper", graph=graph, hyper=hyper_epwk, 
+            group=epiweek, control.group=list(model="rw1", cyclic=TRUE, scale.model=TRUE)
+        ),
+        env=parent.frame(1)
+    )
 }
 
 # plot_predictions <- function(cound_pred, state=unique(count_pred$state), tback=10, tspan=NULL, file=NULL) {

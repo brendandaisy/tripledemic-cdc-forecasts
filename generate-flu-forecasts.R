@@ -13,10 +13,11 @@ source("model-summarize-and-plot.R")
 
 # Data prep and model fitting-----------------------------------------------------
 # Read in current data
-forecast_date <- ymd("2023-12-02") # Saturday following submission date
+forecast_date <- ymd("2024-01-13") # Saturday following submission date
 flu0 <- fetch_flu()
 
-location_info <- distinct(flu0, location, location_name) # get the location coding for saving final results
+# location coding for saving final results
+location_info <- distinct(flu0, location, location_name)
 
 flu <- flu0 |> 
     select(-location, location=location_name, count=value)
@@ -38,8 +39,8 @@ pred_samples <- sample_count_predictions(fit_df, fit, forecast_date, nsamp=2000)
 # Produce the two summary dataframes to be submitted------------------------------
 quantiles_needed <- c(0.01, 0.025, seq(0.05, 0.95, by = 0.05), 0.975, 0.99)
 
-cleaned_forecasts_quantiles <- summarize_quantiles(pred_samples, nat_samps, forecast_date, quantiles_needed)
-cleaned_forecasts_ratechange <- summarize_rate_change(pred_samples, nat_samps, forecast_date)
+cleaned_forecasts_quantiles <- summarize_quantiles_cdc(pred_samples, nat_samps, forecast_date, quantiles_needed)
+cleaned_forecasts_ratechange <- summarize_rate_change_cdc(pred_samples, nat_samps, forecast_date)
 
 # Save the prediction summaries
 cleaned_forecasts_quantiles |>
@@ -49,6 +50,8 @@ cleaned_forecasts_quantiles |>
     select(-location, location=location.y) |> 
     relocate(location, .after=target_end_date) |> 
     write_csv(paste0("weekly-predictions/", forecast_date,"-UGA_flucast-INfLAenza.csv"))
+
+plot_seasonal(fit_df, fit)
 
 # Plot the predictions for this week----------------------------------------------
 library(cowplot)
@@ -62,24 +65,18 @@ forecast_df <- cleaned_forecasts_quantiles |>
     # left_join(locations, by='location') |> 
     spread(output_type_id, value)
 
-# sample a few forecasts from the joint distribution to show correlations across states and time
-ts_ids <- sample(2000, 4)
-
-sampled_timeseries <- pred_samples |> 
-    unnest(count_samp) |> 
-    group_by(date, location) |> 
-    mutate(samp_id=1:n()) |> 
-    filter(samp_id %in% ts_ids) |> 
-    ungroup()
-
 plots <- unique(flu$location) |> 
     map(plot_state_forecast, 
         curr_season_data = curr_season_data, 
-        forecast_df = forecast_df,
-        sampled_ts=sampled_timeseries)
+        forecast_df = forecast_df)
 
-plot_grid(plotlist = plots) |> 
-    save_plot(filename=paste0("weekly-predictions/prediction-fig-", forecast_date, ".pdf"), base_height=12, base_asp=1.6, bg='white')
+pred_fig <- plot_grid(plotlist = plots)
+pred_fig
+
+save_plot(
+    pred_fig, filename=paste0("weekly-predictions/prediction-fig-", forecast_date, ".pdf"), 
+    base_height=12, base_asp=1.6, bg='white'
+)
 
 cleaned_forecasts_ratechange <- cleaned_forecasts_ratechange |> 
     mutate(output_type_id=fct_relevel(output_type_id, c("large_increase", "increase", "stable", "decrease")))

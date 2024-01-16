@@ -53,7 +53,20 @@ sample_national <- function(fit_df, fit, forecast_date, nsamp=1000) {
         select(date:epiweek, location, population, count_samp)
 }
 
+# A simpler quantile summary not in the FluSight format
 summarize_quantiles <- function(pred_samples, nat_samps, forecast_date, q) {
+    pred_samples |> 
+        filter(date >= forecast_date) |> 
+        bind_rows(nat_samps) |> 
+        unnest(count_samp) |> 
+        group_by(date, location) |> 
+        summarize(qs = list(value = quantile(count_samp, probs=q)), .groups="drop") |> 
+        unnest_wider(qs) |>
+        pivot_longer(contains("%"), names_to="quantile") |> 
+        mutate(quantile=parse_number(quantile)/100)
+}
+
+summarize_quantiles_cdc <- function(pred_samples, nat_samps, forecast_date, q) {
     pred_samples |> 
         filter(date >= forecast_date) |> 
         bind_rows(nat_samps) |> 
@@ -74,7 +87,7 @@ summarize_quantiles <- function(pred_samples, nat_samps, forecast_date, q) {
         dplyr::select(reference_date, target, horizon, target_end_date, location, output_type, output_type_id, value)
 }
 
-summarize_rate_change <- function(pred_samples, nat_samps, forecast_date) {
+summarize_rate_change_cdc <- function(pred_samples, nat_samps, forecast_date) {
     pred_samples <- bind_rows(pred_samples, nat_samps)
     
     last_values <- pred_samples |> 
@@ -136,21 +149,21 @@ summarize_rate_change <- function(pred_samples, nat_samps, forecast_date) {
 }
 
 # Make plots --------------------------------------------------------------
-plot_state_forecast <- function(location_name, curr_season_data, forecast_df, sampled_ts) {
+plot_state_forecast <- function(location_name, curr_season_data, forecast_df) {
     curr_df <- curr_season_data |> 
         filter(location == location_name)
     
     forecast_df <- filter(forecast_df, location == location_name)
-    ts_df <- filter(sampled_ts, location == location_name)
+    # ts_df <- filter(sampled_ts, location == location_name)
     
     ggplot(forecast_df, aes(target_end_date, `0.5`)) +
         geom_ribbon(aes(ymin = `0.025`, ymax = `0.975`), alpha = .2) +
         geom_ribbon(aes(ymin = `0.25`, ymax = `0.75`), alpha = .2) +
         geom_line() +
-        geom_line(
-            aes(date, count_samp, group=samp_id, col=as.factor(samp_id)), ts_df, 
-            alpha=0.5, show.legend=FALSE
-        ) +
+        # geom_line(
+        #     aes(date, count_samp, group=samp_id, col=as.factor(samp_id)), ts_df, 
+        #     alpha=0.5, show.legend=FALSE
+        # ) +
         geom_point(data = curr_df, aes(date, count)) +
         labs(title = location_name, x = NULL, y ='Admits') +
         background_grid(major = 'xy', minor = 'y') +
@@ -201,18 +214,34 @@ pmf_legend <- function(ratechange_df) {
     
     get_legend(p)
 }
-
+flu0
 # assumes the most recent week of data is in first row, for current epiweek
+# plot_seasonal <- function(df, fit) {
+#     ep_wk_fx <- fit$summary.random$epiweek |> 
+#         as_tibble()
+#     # mutate(state=rep(unique(dat_pred$state), each=53)) # assumes states are in correct order in dat_pred
+#     
+#     ggplot(ep_wk_fx, aes(ID, mean)) +
+#         geom_ribbon(aes(ymin=`0.025quant`, ymax=`0.975quant`), col="gray70", alpha=0.6) +
+#         geom_line(col="tomato3") +
+#         geom_vline(xintercept=first(df$epiweek), col="steelblue", linetype="dashed") +
+#         # facet_wrap(~state) +
+#         labs(x="Week of the year", y="Seasonal effect (log scale)") +
+#         theme_bw() +
+#         theme(legend.position="none")
+# }
 plot_seasonal <- function(df, fit) {
-    ep_wk_fx <- fit$summary.random$epiweek |> 
-        as_tibble()
-    # mutate(state=rep(unique(dat_pred$state), each=53)) # assumes states are in correct order in dat_pred
+    ep_wk_fx <- fit$summary.random$snum |> 
+        as_tibble() |> 
+        mutate(state=rep(unique(df$location), times=52))
+    
+    print(ep_wk_fx)
     
     ggplot(ep_wk_fx, aes(ID, mean)) +
         geom_ribbon(aes(ymin=`0.025quant`, ymax=`0.975quant`), col="gray70", alpha=0.6) +
         geom_line(col="tomato3") +
-        geom_vline(xintercept=first(df$epiweek), col="steelblue", linetype="dashed") +
-        # facet_wrap(~state) +
+        # geom_vline(xintercept=first(df$epiweek), col="steelblue", linetype="dashed") +
+        facet_wrap(~state) +
         labs(x="Week of the year", y="Seasonal effect (log scale)") +
         theme_bw() +
         theme(legend.position="none")
