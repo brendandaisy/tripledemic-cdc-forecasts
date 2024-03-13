@@ -6,6 +6,7 @@ library(INLA)
 library(sf)
 library(spdep)
 library(lubridate)
+library(cowplot)
 
 source("read-flu-data.R")
 source("model-prep-and-fit.R")
@@ -13,7 +14,7 @@ source("model-summarize-and-plot.R")
 
 # Data prep and model fitting-----------------------------------------------------
 # Read in current data
-forecast_date <- ymd("2024-01-13") # Saturday following submission date
+forecast_date <- ymd("2024-03-09") # Saturday following submission date
 flu0 <- fetch_flu()
 
 # location coding for saving final results
@@ -27,7 +28,9 @@ us <- load_us_graph(flu)
 us_adj <- us_adj_mat(us)
 
 fit_df <- prep_fit_data(flu, weeks_ahead=4)
-fit <- fit_current_model(fit_df, forecast_date, graph=us_adj, joint=TRUE)
+
+model <- flu_model_exchangeable()
+fit <- fit_inla_model(fit_df, forecast_date, model, graph=us_adj, joint=TRUE)
 
 # get US predictions
 nat_samps <- sample_national(fit_df, fit, forecast_date, nsamp=2000)
@@ -51,10 +54,9 @@ cleaned_forecasts_quantiles |>
     relocate(location, .after=target_end_date) |> 
     write_csv(paste0("weekly-predictions/", forecast_date,"-UGA_flucast-INfLAenza.csv"))
 
-plot_seasonal(fit_df, fit)
+plot_seasonal(fit_df, fit, forecast_date)
 
 # Plot the predictions for this week----------------------------------------------
-library(cowplot)
 theme_set(theme_cowplot())
 
 curr_season_data <- flu |>
@@ -78,6 +80,7 @@ save_plot(
     base_height=12, base_asp=1.6, bg='white'
 )
 
+# qualitative rate-change plot
 cleaned_forecasts_ratechange <- cleaned_forecasts_ratechange |> 
     mutate(output_type_id=fct_relevel(output_type_id, c("large_increase", "increase", "stable", "decrease")))
 
@@ -87,10 +90,10 @@ plots_pmfs <- map(
 )
 
 legend <- pmf_legend(cleaned_forecasts_ratechange)
+pred_fig <- ggdraw(plot_grid(plotlist=plots_pmfs)) + draw_plot(legend, 0.76, -0.4)
 
 save_plot(
-    filename=paste0("weekly-predictions/ratechange-fig-", forecast_date, ".pdf"), 
-    plot=ggdraw(plot_grid(plotlist=plots_pmfs)) + draw_plot(legend, 0.76, -0.4),
+    pred_fig, filename=paste0("weekly-predictions/ratechange-fig-", forecast_date, ".pdf"), 
     base_height=12, base_asp=1.6, bg='white'
 )
 

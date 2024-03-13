@@ -48,14 +48,6 @@ prep_fit_data <- function(flu, weeks_ahead=4) {
             ex_lam=population
         )
     
-    # flu <- flu |> 
-    #     group_by(year, epiweek) |> 
-    #     mutate(tot_count=sum(count)) |> 
-    #     ungroup(year) |> 
-    #     mutate(ex_lam=(population / pop_nat) * mean(tot_count), .after=count) |> 
-    #     ungroup() |> 
-    #     select(-tot_count)
-    
     # make a dataframe to hold group info for forecasting
     pred_df <- expand_grid(
         tibble(
@@ -65,8 +57,8 @@ prep_fit_data <- function(flu, weeks_ahead=4) {
         ),
         distinct(ret, location, snum, population) # makes pairs of new times X each state
     ) |> 
-        # go and find `ex_lam` values for each state and epiweek
-        left_join(distinct(ret, location, epiweek, ex_lam), by=c("location", "epiweek"))
+        # go and find `ex_lam` values for each state
+        left_join(distinct(ret, location, ex_lam), by=c("location"))
     
     bind_rows(ret, pred_df) |> # add to data for counts to be NAs
         arrange(t)
@@ -74,34 +66,28 @@ prep_fit_data <- function(flu, weeks_ahead=4) {
 
 # forecast_date = the first OUT of sample date, i.e. date to start predictions
 # graph = state adjacency graph, to be used as specified by model
-fit_current_model <- function(
-        fit_df, forecast_date, model=NULL,
-        q=c(0.025, 0.5, 0.975), graph=NULL, joint=TRUE
+fit_inla_model <- function(
+        fit_df, forecast_date, model=current_flu_model(),
+        q=c(0.025, 0.5, 0.975), graph=NULL, joint=TRUE, diagnostics=FALSE
     ) {
     # the PC priors c(u, a) give the probability that the standard deviation between weeks u is greater than a
-    # increasing u increases prior beliefs that there will be large jumps in data between weeks
+    # increasing u increases prior beliefs that there will be large jumps between weeks
     hyper_epwk <- list(prec=list(prior="pc.prec", param=c(0.5, 0.01))) # a priori the seasonal effect should be more smooth
     hyper_wk <- list(prec=list(prior="pc.prec", param=c(1, 0.01))) # more favorable to large jumps
     
-    if (is.null(graph)) {
-        sp_control <- list(model="exchangeable")
-        mod <- count ~ 1 + # intercept
-            f(epiweek, model="rw2", cyclic=TRUE, hyper=hyper_epwk, scale.model=TRUE) + # seasonal effect (currently shared over states)
-            f(t, model="ar1", group=snum, hyper=hyper_wk, control.group=sp_control) # weekly x state effect
-    } else {
-        mod <- count ~ 1 + location +
-            f(epiweek, model="rw2", cyclic=TRUE, hyper=hyper_epwk, scale.model=TRUE) +
-            f(snum, model="besagproper", graph=graph, hyper=hyper_wk, group=t, control.group=list(model="ar1"))
-    }
+    mod <- as.formula(model)
     
     pred_idx <- which(fit_df$date >= forecast_date)
     fit <- inla(
         mod, family="poisson", data=fit_df, # poisson regression link
         E=fit_df$ex_lam,
         quantiles=q,
-        selection=if (!joint) NULL else list(Predictor=pred_idx),
-        # lincomb=inla.make.lincombs(Predictor=lc_nat),
-        control.compute=list(dic=FALSE, mlik=FALSE, return.marginals.predictor=TRUE),
+        selection=if (joint) list(Predictor=pred_idx) else NULL,
+        control.compute=c(
+            if (diagnostics) list(dic=TRUE, mlik=TRUE) else list(mlik=FALSE),
+            list(return.marginals.predictor=TRUE)
+        ),
+        # control.inla=if (diagnostics) list(npoints=12, int.strategy="grid", diff.logdens=4) else NULL,
         control.predictor=list(link=1) # compute quantiles for NA dates (i.e. do the forecasting)
     )
     return(fit)
@@ -110,51 +96,20 @@ fit_current_model <- function(
 # assumes the following variables are available in the environment:
 # epiweek, snum, week, graph, and lists storing hyperpriors for the seasonal and weekly
 # random effects, `hyper_epwk` and `hyper_wk` respectively
-current_flu_model <- function(graph) {
-    count ~ 1 +
-        f(epiweek, model="rw2", cyclic=TRUE, hyper=hyper_epwk, scale.model=TRUE) +
-        f(snum, model="besagproper", graph=graph, hyper=hyper_wk, group=t, control.group=list(model="ar1"))
-}
-
-flu_model_1_10 <- function() {
-    as.formula(count ~ 1 +
-        f(t, model="ar1", hyper=hyper_wk) +
-        f(
-            snum, model="besagproper", graph=graph, hyper=hyper_epwk, 
-            group=epiweek, control.group=list(model="rw1", cyclic=TRUE, scale.model=TRUE)
-        ),
-        env=parent.frame(1)
+flu_model_pcar <- function(epiweek=TRUE, week=TRUE) {
+    paste0(
+        'count ~ 1 + location + ',
+        if (epiweek) 'f(epiweek, model="rw2", cyclic=TRUE, hyper=hyper_epwk, scale.model=TRUE) + ' else "",
+        if (week) 'f(snum, model="besagproper", graph=graph, hyper=hyper_wk, group=t, control.group=list(model="ar1"))' else ""
     )
 }
 
-# plot_predictions <- function(cound_pred, state=unique(count_pred$state), tback=10, tspan=NULL, file=NULL) {
-#     # pred_summ <- fit$summary.fitted.values |> 
-#     #     as_tibble() |> 
-#     #     select(mean, contains("quant"))
-#     
-#     tpred <- min(filter(count_pred, is.na(count))$t)
-#     
-#     df_plt <- filter(
-#             count_pred,
-#             if(is.null(tspan)) t >= (tpred - tback) else date %within% tspan,
-#             state %in% !!state
-#         )
-#     
-#     gg <- ggplot(df_plt, aes(date, count)) +
-#         geom_ribbon(aes(ymin=`25%`, ymax=`75%`), fill="gray60", alpha=0.6) +
-#         geom_ribbon(aes(ymin=`2.5%`, ymax=`97.5%`), fill="gray80", alpha=0.6) +
-#         geom_point(col="steelblue", size=1.05) +
-#         # geom_point(aes(y=count_true), filter(df_plt, is.na(count)), col="maroon1", size=1.05) +
-#         geom_line(aes(y=mean), col="tomato3") +
-#         facet_wrap(~state, scales="free_y", nrow=4) +
-#         scale_x_date(date_breaks="4 weeks", date_labels="%d %b %y", guide=guide_axis(angle=45)) +
-#         labs(x="Weeks", y="Hospitalizations") +
-#         theme_bw() +
-#         theme(panel.spacing=unit(0, "mm"), axis.title=element_text(size=14))
-#     
-#     if (!is.null(file))
-#         ggsave(file, gg, width=14, height=8)
-#     gg
-# }
+flu_model_exchangeable <- function(epiweek=TRUE, week=TRUE) {
+    paste0(
+        'count ~ 1 + location + ',
+        if (epiweek) 'f(epiweek, model="rw2", cyclic=TRUE, hyper=hyper_epwk, scale.model=TRUE) + ' else "",
+        if (week) 'f(t, model="ar1", hyper=hyper_wk, group=snum, control.group=list(model="exchangeable"))' else ""
+    )
+}
 
 
